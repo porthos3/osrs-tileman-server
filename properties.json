@@ -1,4 +1,5 @@
 {
   "port" : 3000,
-  "secret" : "secret"
+  "secret" : "secret",
+  "chunk-size-in-kb" : 1000
 }

@@ -15,7 +15,7 @@
                                         (.deleteOnExit))
                           :tail-file  (doto (File/createTempFile "current" ".tail")
                                         (.deleteOnExit))
-                          :properties {:port 3001 :secret "secret"}})
+                          :properties {:port 3001 :secret "secret" :chunk-size-in-kb 1000}})
   (f)
   (mount/stop))
 
@@ -24,6 +24,9 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; Test utilities
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(def NINE_HUNDRED_AND_NINETY_BYTE_STR (apply str (repeat 99 "1234567890")))
+(def ONE_KB_ENTITY {"a" NINE_HUNDRED_AND_NINETY_BYTE_STR}) ;'{"a":"<str>"},\n' in log file, 10 bytes plus 990 byte str
 
 (defn get-all-events-expect-ok []
   (let [{:keys [status body]} @(http/get "http://localhost:3001/event-log/"
@@ -88,9 +91,9 @@
         response3 (get-all-events-expect-ok)
         response4 (get-all-events-expect-ok)]
     (testing "new marker should be zero when stream empty"
-      (is (= 0 (get response1 "new-marker"))))
+      (is (= 0 (get response1 "next-marker"))))
     (testing "new markers should monotonically increase as events are posted"
-      (is (< (get response1 "new-marker") (get response2 "new-marker") (get response3 "new-marker"))))
+      (is (< (get response1 "next-marker") (get response2 "next-marker") (get response3 "next-marker"))))
     (testing "get results should be identical if no posts have been performed in-between"
       (is (= response3 response4)))
     (testing "empty array returned when getting an empty event log"
@@ -104,10 +107,10 @@
   (let [response1 (get-all-events-expect-ok)
         _ (post-events-expect-ok [{"a" 1}])
         _ (post-events-expect-ok [{"a" 2}])
-        response2 (get-events-after-marker-expect-ok (get response1 "new-marker"))
+        response2 (get-events-after-marker-expect-ok (get response1 "next-marker"))
         _ (post-events-expect-ok [{"a" 3}])
-        response3 (get-events-after-marker-expect-ok (get response2 "new-marker"))
-        response4 (get-events-after-marker-expect-ok (get response3 "new-marker"))]
+        response3 (get-events-after-marker-expect-ok (get response2 "next-marker"))
+        response4 (get-events-after-marker-expect-ok (get response3 "next-marker"))]
     (testing "empty array returned when event log is empty"
       (is (= [] (get response1 "events"))))
     (testing "after consecutive posts, next get should return the sum of all posted events so far"
@@ -164,3 +167,15 @@
       (is (= response1 response2)))
     (testing "events should be unchanged by post with invalid schema"
       (is (= response2 response3)))))
+
+(deftest get-events-batches
+  (let [_ (post-events-expect-ok (vec (repeat 1500 ONE_KB_ENTITY))) ;post 1.5 MB of entities
+        response1 (get-all-events-expect-ok)
+        response2 (get-events-after-marker-expect-ok (get response1 "next-marker"))]
+    (testing "when too many entities in log file, returned pointer should not be the last byte in the log file"
+      (is (> 1400000 (get response1 "next-marker"))))
+    (testing "when too many entities in log file, not all should be returned in the first batch"
+      (is (> 1500 (count (get response1 "events")))))
+    (testing "all events should be returned after enough chained requests"
+      (is (= 1500 (+ (count (get response1 "events"))
+                     (count (get response2 "events"))))))))

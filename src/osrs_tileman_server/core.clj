@@ -40,8 +40,8 @@
               (ok)))))
 
 (defn handle-get-events-request [after]
-  (try (let [{:keys [new-marker events-json]} (persistence/read-events-since-marker after)]
-         (-> (str "{\"new-marker\":" new-marker ",\"events\":" events-json "}")
+  (try (let [{:keys [next-marker events-json]} (persistence/read-events-since-marker after)]
+         (-> (str "{\"next-marker\":" next-marker ",\"events\":" events-json "}")
              ok
              (content-type "application/json")))
        (catch IllegalArgumentException e
@@ -61,11 +61,13 @@
 
   (route/not-found "Error: Resource not found."))
 
+(def DEFAULT_PORT 3000)
+
 (mount/defstate ^{:on-reload :noop} web-server
   :start (server/run-server (-> #'app-routes
                                 default-content-type-middleware
                                 (wrap-defaults api-defaults))
-                            {:port (get-in (mount/args) [:properties :port] 3000)}) ;default to port 3000 if not specified
+                            {:port (get-in (mount/args) [:properties :port] DEFAULT_PORT)})
   :stop (web-server :timeout 100)) ;give 100ms for received requests to complete before shutting down
 
 (defn -main [& args]
@@ -74,4 +76,4 @@
     (mount/start-with-args {:event-file (File. "current.events")
                             :tail-file (File. "current.tail")
                             :properties properties-map})
-    (println (str "Server started on port " (get properties-map :port 3000)))))
+    (println (str "Server started on port " (:port properties-map DEFAULT_PORT)))))

@@ -4,9 +4,9 @@
             [clojure.java.io :as io]
             [mount.core :as mount])
   (:import (java.io File RandomAccessFile)
-           (java.time.format DateTimeFormatter)
+           (java.nio.charset Charset)
            (java.time ZonedDateTime)
-           (java.nio.charset Charset)))
+           (java.time.format DateTimeFormatter)))
 
 (def MARKER_OUTSIDE_VALID_RANGE_MESSAGE "Provided a read marker outside of the available range.")
 
@@ -74,13 +74,20 @@
                (deliver return-promise {:success false :exception e})))
         (recur)))))
 
-(defn- read-bytes-between [a b]
-  (let [num-bytes-to-read (max 0 (- b a 2)) ;chop off trailing ",\n"
-        arr (byte-array num-bytes-to-read)]
-    (doto (RandomAccessFile. ^File (:event-file (mount/args)) "r")
-      (.seek a)
-      (.read arr))
-    (String. arr (Charset/defaultCharset))))
+(defn- read-batch-after-marker [marker]
+  (let [raf (doto (RandomAccessFile. ^File (:event-file (mount/args)) "r")
+              (.seek marker))]
+    (loop [marker marker, str-so-far "", get-index-fn #(.lastIndexOf % "\n")]
+      (let [arr (byte-array (min (- @tail-pointer marker)
+                                 (* 1000 (get-in (mount/args) [:properties :chunk-size-in-kb] 1000)))) ;default 1MB chunk size
+            _ (.read raf arr)
+            s (String. ^bytes arr ^Charset (Charset/defaultCharset))
+            i (get-index-fn s)]
+        (if (neg? i) ;if a delimiter does not exist in the chunk (chunk is one massive event), we must read more chunks
+          (recur (+ marker (alength arr)) (str str-so-far s) #(.indexOf % "\n"))
+          (let [last-index (dec (+ (count str-so-far) i))] ;decrement to remove the "," that precedes the line break
+            {:next-marker (+ marker i 1) ;add one so next read will start after the line break
+             :events-json (str "[" (subs (str str-so-far s) 0 last-index) "]")}))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; Public functions for persistence contract
@@ -93,8 +100,6 @@
     (or success (throw exception))))
 
 (defn read-events-since-marker [marker]
-  (when-not (<= 0 marker @tail-pointer)
-    (throw (IllegalArgumentException. ^String MARKER_OUTSIDE_VALID_RANGE_MESSAGE)))
-  (let [new-marker @tail-pointer]
-    {:new-marker new-marker
-     :events-json (str "[" (read-bytes-between marker new-marker) "]")}))
+  (cond (= marker @tail-pointer) {:next-marker marker :events-json "[]"}
+        (<= 0 marker @tail-pointer) (read-batch-after-marker marker)
+        :else (throw (IllegalArgumentException. ^String MARKER_OUTSIDE_VALID_RANGE_MESSAGE))))
